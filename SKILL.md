@@ -31,10 +31,10 @@ Task1: [名稱] — [說明、影響檔案]
 Task2: [名稱] — [說明、影響檔案]
 Task3: ...
 
-確認後開始執行。
+直接開始執行。
 ```
 
-4. **等待用戶確認**後繼續。
+4. **直接開始執行**。
 
 ---
 
@@ -65,6 +65,12 @@ Task3: ...
 ```
 
 Status: `pending` → `in_progress` → `completed` | `failed`
+
+**驗證機制**：
+- 每次讀取狀態檔案時，必須驗證 JSON 格式是否有效
+- 若驗證失敗：使用備份檔案（若存在）或標記為 `failed`
+- 每次更新狀態前，先讀取現存檔案並驗證 JSON 格式
+- 若寫入失敗：記錄錯誤日誌，標記為 `failed`，跳過該任務繼續執行下一任務
 
 ### Step 2b — 註冊 Cron 恢復任務
 
@@ -118,11 +124,11 @@ Pi 支援 Anthropic prompt caching（PR #584, 2026-01），編程任務更高效
 依序執行子任務（不使用 `run_in_background`）：
 
 1. **更新 todo** — 標記為 `in_progress`
-2. **更新 state 檔案** — status → `"in_progress"`
+2. **更新 state 檔案** — status → `\"in_progress\"`
 3. **構建 subagent 提示**（下方模板）
 4. **啟動 subagent** — 等待完成
 5. **成功**：todo → `completed`，更新 state（status、summary、accumulated_context）
-6. **失敗**：重試一次；二次失敗則標記 `failed` 並停止
+6. **失敗**：重試一次（立即重試）；二次失敗：標記為 `failed`，記錄錯誤訊息 + 時間 + 堆疊追蹤，跳過該任務，繼續執行下一任務
 
 ### Subagent 提示模板
 
