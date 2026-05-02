@@ -3,7 +3,7 @@ name: coding-dispatch
 description: >
   分解多步驟編程任務，透過 subagent 依序執行，支援 cron 斷點續傳。
   主動用於多步驟實作任務（例如「實作功能 X 需要 A、B、C」、「重構模組 Y 並更新呼叫者」）。
-  適配 64k context 限制，最大化 subagent 委派以節省主 agent token。
+  適配 64k context 硬限制，強制 subagent 委派以節省主 agent token。
   狀態檔案統一存放於 ~/.hermes/dispatches/，支援 crash 後自動恢復。
 ---
 
@@ -77,15 +77,16 @@ Status 狀態機: `pending` → `in_progress` → `completed` | `failed`
 
 ---
 
-## 64k Context 節省策略
+## 64k Context 強制規則（硬限制）
 
-主 agent context 僅 64k，必須嚴格控制 token 消耗：
+主 agent context 僅 64k，這是不可突破的硬限制。所有複雜任務必須遵守以下規則：
 
-- **能丟給 subagent 的就丟** — 檔案讀寫、程式碼實作、script 執行、測試驗證都交給 leaf agent
-- **subagent 回傳只留摘要** — 要求 subagent 回覆簡潔，不要大段程式碼貼回主 agent
-- **accumulated_context 保持精簡** — 每個已完成的子任務只用 1-2 行摘要，不保留細節
-- **主 agent 只做** — 任務拆解、決策判斷、狀態管理、最終整合
-- **狀態檔案是斷點** — 每次子任務完成都寫入狀態檔案，crash 後可恢復
+- **強制委派** — 檔案讀寫、程式碼實作、script 執行、測試驗證，全部交給 leaf sub-agent。主 agent 不碰實作。
+- **摘要回傳** — sub-agent 回覆只留摘要，不要大段程式碼貼回主 agent。
+- **accumulated_context 精簡** — 每個已完成子任務只用 1-2 行摘要，不保留細節。
+- **主 agent 只做** — 任務拆解、決策判斷、狀態管理、最終整合。
+- **狀態檔案是斷點** — 每次子任務完成都寫入狀態檔案，crash 後可恢復。
+- **違反即失敗** — 若主 agent 嘗試在 context 內執行大段程式碼或載入大型檔案內容，即視為違反 64k 限制。
 
 ---
 
@@ -307,7 +308,7 @@ Original task: {original_task}
 - **自足提示** — subagent 無記憶，所有上下文透過 `accumulated_context` 嵌入
 - **依序不並行** — 子任務依序執行，不並行
 - **增量進度** — 每子任務保持程式碼庫可運作
-- **64k context 警覺** — 主 agent 只做協調，重活丟給 subagent
+- **64k context 硬限制** — 主 agent 只做協調，所有實作工作強制委派給 sub-agent。不得違反。
 - **accumulated_context 精簡** — 每任務 1-2 行，不累積冗長內容
 - **Cron 清理必要** — 完成後務必移除 cron job + 從主索引檔刪除記錄
 - **失敗不阻塞** — 子任務失敗（重試後）標記 failed 並跳過，繼續後續任務
