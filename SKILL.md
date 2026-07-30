@@ -22,6 +22,31 @@ each subtask focused and prevents context window bloat from accumulating too muc
 own tools, make design decisions. Do NOT read the subagents' produced code wholesale — that defeats
 the purpose of dispatching.
 
+### Context economy (what "dispatcher, not implementer" means concretely)
+
+- **Delegate the bulk work**: file writing, implementation, running test suites, exploring unfamiliar
+  code. You write prompts and run targeted verification commands.
+- **Summaries come back, not code**: ask subagents for a report, not for pasted source. If you need
+  to check something, grep or run a command — don't load whole produced files.
+- **Keep the accumulated record tight**: each finished subtask contributes interfaces + gotchas
+  (signatures, conventions, traps), not narrative and not code. If an entry is growing past a short
+  block, it has stopped being a handoff and become a copy of the source.
+- **Every subtask boundary is a resume point**: write state to disk when a subtask finishes, so a
+  crash or context limit costs at most one subtask.
+
+## Session Start: Check for Unfinished Dispatches
+
+Whenever this skill activates, **first** read the index at `~/.claude/dispatch/active_dispatches.json`
+(if it exists). If it lists a dispatch that is not finished:
+
+1. Read that entry's `tracking_file` for the detail.
+2. Report to the user: which task, how far it got (`current_task` / `total_tasks`), when it was last
+   touched, and what the next subtask is.
+3. Ask whether to resume it or start something new. Don't silently resume — the user may have moved on.
+
+This is what makes a dispatch survive a context limit even when the new session has no idea which
+project the work belonged to. If the index doesn't exist, there is nothing in flight; continue normally.
+
 ## When This Skill Activates
 
 This skill is for coding tasks that have **3 or more distinct implementation steps**. Examples:
@@ -35,26 +60,69 @@ Do NOT use this for:
 - Research or exploration tasks
 - Tasks the user wants to do interactively step-by-step
 
-## Phase 0: Create the Tracking File (do this first)
+## Phase 0: Set Up Durable State (do this first)
 
 A dispatched task is long-running. The session **will** hit a context limit or get interrupted, so
-progress must live on disk, not only in the session's task list. Before dispatching anything, create
-`<PROJECT>_TASKS.md` (or `TASKS.md`) next to the design doc it implements, containing:
+progress must live on disk, not only in the session's task list. Two layers, each with one job:
+
+| Layer | Path | Job |
+|-------|------|-----|
+| **Index** (machine-readable) | `~/.claude/dispatch/active_dispatches.json` | Fixed, project-independent location so *any* new session can discover in-flight work |
+| **Tracking file** (human-readable) | `<PROJECT>_TASKS.md`, next to the design doc | All the detail: task table, constraints, accumulated results, deviations, open questions |
+
+### The index
+
+```json
+{
+  "dispatches": [
+    {
+      "task_id": "dispatch-20260731-1030",
+      "display_name": "萬用 autotune 實作",
+      "project_dir": "/absolute/path/to/project",
+      "tracking_file": "/absolute/path/to/project/UNIVERSAL_TASKS.md",
+      "branch": "feature/universal-autotune",
+      "current_task": 3,
+      "total_tasks": 7,
+      "created_at": "2026-07-31T10:30:00",
+      "updated_at": "2026-07-31T12:05:00"
+    }
+  ]
+}
+```
+
+- Create the file and its directory if absent; append one entry when a dispatch starts.
+- Update `current_task` / `updated_at` **every time a subtask finishes** — this is the resume point.
+- **Remove the entry when the dispatch completes** (or is abandoned). A stale entry makes every
+  future session ask about work that is already done.
+- Keep it small: it is an index, not a log. Detail belongs in the tracking file.
+
+### The tracking file
+
+Create `<PROJECT>_TASKS.md` (or `TASKS.md`) next to the design doc it implements, containing:
 
 1. **Header** — branch name, contract/design doc path, how work is split (which subtasks go to
    subagents, which you do yourself), status legend, and the current progress line.
 2. **Resume instructions** — what a fresh session should do first: read the task table, find the
    first unfinished subtask, read the contract's relevant section, read the accumulated results
    section, build the prompt, dispatch.
-3. **Task table** — one row per subtask: number, name, contract section, output files, status.
+3. **Task table** — one row per subtask: number, name, contract section, output files, **who executes
+   it** (dispatched vs. yourself), status (`pending` → `in_progress` → `completed` | `failed`).
 4. **Shared constraints block** — written **once** here, pasted into every subagent prompt
    (see the prompt template below). Don't rewrite it per prompt.
 5. **Accumulated results section** — grows after each subtask; this is the next subtask's Prior Work.
 6. **Deviation log** — decisions that differ from the contract, and whether the contract was updated.
 7. **Open questions** — things the user must decide, with enough context to decide later.
 
-Keep the session task list (TaskCreate/TaskUpdate) in sync with the file — the file is the durable
-record, the task list is the live view.
+Keep the session task list (TaskCreate/TaskUpdate) in sync with both — the two files are the durable
+record, the task list is the live view for the user.
+
+### Optional: unattended recovery
+
+If the user wants the dispatch to keep going without them (long runs, overnight), register a
+scheduled agent (`CronCreate` in Claude Code) that periodically reads the index, finds the first
+unfinished subtask, dispatches it, and updates state — removing its own schedule once the index entry
+is gone. **Only set this up when the user explicitly asks**: it runs agents unattended and costs money
+without anyone watching. Default is no cron; the index alone already makes manual resume trivial.
 
 ## Phase 1: Task Analysis and Decomposition
 
@@ -148,7 +216,8 @@ Please implement this task. When done, report:
 
 For each subtask:
 
-1. **Update trackers** — Mark the subtask `in_progress` in the session task list.
+1. **Update trackers** — Mark the subtask `in_progress` in the session task list and in the tracking
+   file's task table.
 2. **Launch subagent** — Use the Agent tool with the constructed prompt.
    - Pick `subagent_type` from the table below. Leave `model` unset by default — the agent
      definition (or the parent) decides. If the user names a model for implementation work, pass
@@ -170,8 +239,12 @@ For each subtask:
    - If the contract doc was ambiguous or wrong, **edit the doc now** — the next subtask will read
      it and repeat the mistake otherwise.
    - Record the decision in the tracking file's deviation log.
-5. **Update the tracking file** — status → done, append the accumulated-results entry written as
-   interfaces + gotchas (this is the next prompt's Prior Work), append any new open questions.
+5. **Write the resume point** — this is the step that makes a crash cost one subtask instead of the
+   whole run. Do all three:
+   - Tracking file: status → `completed`, append the accumulated-results entry (interfaces + gotchas,
+     the next prompt's Prior Work), append any new open questions.
+   - Index: bump `current_task` and `updated_at`.
+   - Session task list: mark completed.
 6. **Then** dispatch the next subtask.
 
 ### Error Handling
@@ -181,7 +254,14 @@ When a subagent reports failure, or your verification finds the work is wrong:
 1. **First attempt**: Retry with the same prompt plus:
    - The specific failure — paste the actual error output or the check that failed
    - The correction (e.g. "the function signature should be X not Y")
-2. **Second failure**: Stop the entire pipeline and report to the user:
+2. **Second failure**: mark the subtask `failed` in the tracking file with the error, then:
+   - **If later subtasks depend on it** (the normal case in a sequential plan): stop the pipeline.
+     Leave the index entry in place so the run can be resumed after the blocker is resolved.
+   - **If it is genuinely independent** (e.g. a standalone doc or an optional check): continue with
+     the rest, and list it as outstanding in the final report. Never continue past a failure that
+     later subtasks build on — you would be stacking work on a broken foundation.
+
+   Report to the user either way:
    ```
    Subtask N "[name]" failed after retry.
 
@@ -189,6 +269,7 @@ When a subagent reports failure, or your verification finds the work is wrong:
    Retry attempt: [what happened]
 
    Completed subtasks (1 to N-1) are intact and recorded in [tracking file].
+   [Stopped here / Continued with subtasks X, Y — N is still outstanding]
    How would you like to proceed?
    ```
 
@@ -204,6 +285,9 @@ Do the acceptance pass yourself — it is not a dispatched subtask:
 - Reconcile the contract doc against what was actually built.
 - Fix small, clearly-correct issues yourself and record them in the deviation log; escalate
   anything that is a judgment call.
+- **Remove the dispatch's entry from `~/.claude/dispatch/active_dispatches.json`**, and if a recovery
+  cron was registered, remove that too. Leave the tracking file in place — it is the record. A stale
+  index entry makes every future session offer to resume finished work.
 
 Then report:
 
@@ -254,4 +338,5 @@ Match the subagent type to the subtask:
 - **Incremental progress**: Each subtask should leave the codebase in a working state. Don't plan subtasks that would break things temporarily.
 - **Respect CLAUDE.md**: Always include relevant coding conventions from CLAUDE.md in each subagent prompt.
 - **Don't over-split**: 3-7 dispatched subtasks is typical. If you have more than 10, consider grouping related work.
-- **Durability over tidiness**: the tracking file is what makes a multi-hour task survive a context limit. Keep it current after every subtask, not at the end.
+- **Durability over tidiness**: the two state layers are what make a multi-hour task survive a context limit — the index so a fresh session can *find* the work, the tracking file so it can *continue* it. Update both after every subtask, not at the end.
+- **Clean up when done**: remove the index entry on completion, so "unfinished dispatch" always means something real.
