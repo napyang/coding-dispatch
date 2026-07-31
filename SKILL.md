@@ -70,6 +70,11 @@ progress must live on disk, not only in the session's task list. Two layers, eac
 | **Index** (machine-readable) | `~/.claude/dispatch/active_dispatches.json` | Fixed, project-independent location so *any* new session can discover in-flight work |
 | **Tracking file** (human-readable) | `<PROJECT>_TASKS.md`, next to the design doc | All the detail: task table, constraints, accumulated results, deviations, open questions |
 
+Both layers are **scaffolding for the run, not deliverables**: they exist so the dispatch survives a
+crash, and both are removed once the work is accepted (Phase 3). Keep the tracking file **out of git**
+for its whole life — don't `git add` it, and add it to `.gitignore` if the repo doesn't already ignore
+it. It should never appear in a commit, so that deleting it at the end is not itself a code change.
+
 ### The index
 
 ```json
@@ -285,9 +290,17 @@ Do the acceptance pass yourself — it is not a dispatched subtask:
 - Reconcile the contract doc against what was actually built.
 - Fix small, clearly-correct issues yourself and record them in the deviation log; escalate
   anything that is a judgment call.
-- **Remove the dispatch's entry from `~/.claude/dispatch/active_dispatches.json`**, and if a recovery
-  cron was registered, remove that too. Leave the tracking file in place — it is the record. A stale
-  index entry makes every future session offer to resume finished work.
+- **Clean up the state layers — only after the acceptance checks above have passed:**
+  - Anything in the tracking file worth keeping must land somewhere permanent **first**: deviation
+    decisions go into the contract/design doc, unresolved items go into the final report's "Decisions
+    the user needs to make". The tracking file is about to be gone; don't let a decision go with it.
+  - **Delete the tracking file** (`<PROJECT>_TASKS.md`). If it was committed by mistake at some point,
+    remove it from version control too (`git rm`) so it doesn't survive in the repo — the finished
+    work is the code and the design doc, not the scaffolding used to build it.
+  - **Remove the dispatch's entry from `~/.claude/dispatch/active_dispatches.json`** (the entry, not
+    the file — other dispatches may be in flight). A stale index entry makes every future session
+    offer to resume finished work.
+  - If a recovery cron was registered, remove that too.
 
 Then report:
 
@@ -312,9 +325,11 @@ All N subtasks finished successfully.
 
 ### State
 - [Committed or not; what is intentionally left out]
+- [Confirm the cleanup: tracking file deleted, index entry removed, cron (if any) removed]
 ```
 
-Point the user at the tracking file so they can resume in a new session.
+This report replaces the tracking file as the human-readable record, so it has to stand on its own —
+by the time the user reads it, `<PROJECT>_TASKS.md` is already gone.
 
 ## Choosing the Right Subagent Type
 
@@ -339,4 +354,8 @@ Match the subagent type to the subtask:
 - **Respect CLAUDE.md**: Always include relevant coding conventions from CLAUDE.md in each subagent prompt.
 - **Don't over-split**: 3-7 dispatched subtasks is typical. If you have more than 10, consider grouping related work.
 - **Durability over tidiness**: the two state layers are what make a multi-hour task survive a context limit — the index so a fresh session can *find* the work, the tracking file so it can *continue* it. Update both after every subtask, not at the end.
-- **Clean up when done**: remove the index entry on completion, so "unfinished dispatch" always means something real.
+- **Clean up when done**: on successful acceptance, delete the tracking file and remove the index
+  entry — the state layers are scaffolding, and the repo should end up holding only the code and the
+  design doc. "Unfinished dispatch" then always means something real. Cleanup is tied to acceptance,
+  not to stopping: a failed or interrupted run leaves both in place so it can be resumed (an
+  abandoned run is cleaned up by hand).
